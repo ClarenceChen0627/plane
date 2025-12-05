@@ -23,6 +23,7 @@ from plane.utils.build_chart import build_analytics_chart
 from plane.utils.date_utils import (
     get_analytics_filters,
 )
+from plane.utils.cache import cache_response
 
 
 class ProjectAdvanceAnalyticsBaseView(BaseAPIView):
@@ -78,6 +79,7 @@ class ProjectAdvanceAnalyticsEndpoint(ProjectAdvanceAnalyticsBaseView):
         }
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @cache_response(timeout=60 * 5)
     def get(self, request: HttpRequest, slug: str, project_id: str) -> Response:
         self.initialize_workspace(slug, type="analytics")
 
@@ -159,6 +161,7 @@ class ProjectAdvanceAnalyticsStatsEndpoint(ProjectAdvanceAnalyticsBaseView):
         )
 
     @allow_permission([ROLE.ADMIN, ROLE.MEMBER])
+    @cache_response(timeout=60 * 5)
     def get(self, request: HttpRequest, slug: str, project_id: str) -> Response:
         self.initialize_workspace(slug, type="chart")
         type = request.GET.get("type", "work-items")
