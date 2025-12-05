@@ -65,7 +65,11 @@ MIDDLEWARE = [
     "plane.middleware.request_body_size.RequestBodySizeLimitMiddleware",
     "plane.middleware.logger.APITokenLogMiddleware",
     "plane.middleware.logger.RequestLoggerMiddleware",
+    "plane.app.middleware.rate_limit_middleware.RateLimitMiddleware",
 ]
+
+# API Rate Limit (Per IP per minute)
+API_RATE_LIMIT = int(os.environ.get("API_RATE_LIMIT", 100))
 
 # Rest Framework settings
 REST_FRAMEWORK = {
