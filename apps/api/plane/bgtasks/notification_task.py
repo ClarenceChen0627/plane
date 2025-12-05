@@ -25,6 +25,8 @@ from django.db.models import Subquery
 # Third Party imports
 from celery import shared_task
 from bs4 import BeautifulSoup
+from collections import defaultdict
+from plane.utils.notification_providers import EmailNotificationProvider
 
 
 # =========== Issue Description Html Parsing and notification Functions ======================
@@ -215,7 +217,10 @@ def notifications(
         ]:
             # Create Notifications
             bulk_notifications = []
-            bulk_email_logs = []
+            # NFR: Plugin System Init
+            providers = [EmailNotificationProvider()]
+            provider_payloads = defaultdict(list)
+            bulk_email_logs = [] # Deprecated but kept to avoid immediate syntax error in refactoring steps
 
             """
             Mention Tasks
@@ -324,25 +329,9 @@ def notifications(
                         continue
 
                     # Check if the value should be sent or not
-                    send_email = False
-                    if issue_activity.get("field") == "state" and preference.state_change:
-                        send_email = True
-                    elif (
-                        issue_activity.get("field") == "state"
-                        and preference.issue_completed
-                        and State.objects.filter(
-                            project_id=project_id,
-                            pk=issue_activity.get("new_identifier"),
-                            group="completed",
-                        ).exists()
-                    ):
-                        send_email = True
-                    elif issue_activity.get("field") == "comment" and preference.comment:
-                        send_email = True
-                    elif preference.property_change:
-                        send_email = True
-                    else:
-                        send_email = False
+                    
+                    # NFR Refactor: Logic moved to NotificationProviders
+
 
                     # If activity is of issue comment fetch the comment
                     issue_comment = (
@@ -400,50 +389,39 @@ def notifications(
                             },
                         )
                     )
-                    # Create email notification
-                    if send_email:
-                        bulk_email_logs.append(
-                            EmailNotificationLog(
-                                triggered_by_id=actor_id,
-                                receiver_id=subscriber,
-                                entity_identifier=issue_id,
-                                entity_name="issue",
-                                data={
-                                    "issue": {
-                                        "id": str(issue_id),
-                                        "name": str(issue.name),
-                                        "identifier": str(issue.project.identifier),
-                                        "project_id": str(issue.project.id),
-                                        "workspace_slug": str(issue.project.workspace.slug),
-                                        "sequence_id": issue.sequence_id,
-                                        "state_name": issue.state.name,
-                                        "state_group": issue.state.group,
-                                    },
-                                    "issue_activity": {
-                                        "id": str(issue_activity.get("id")),
-                                        "verb": str(issue_activity.get("verb")),
-                                        "field": str(issue_activity.get("field")),
-                                        "actor": str(issue_activity.get("actor_id")),
-                                        "new_value": str(issue_activity.get("new_value")),
-                                        "old_value": str(issue_activity.get("old_value")),
-                                        "issue_comment": str(
-                                            issue_comment.comment_stripped if issue_comment is not None else ""
-                                        ),
-                                        "old_identifier": (
-                                            str(issue_activity.get("old_identifier"))
-                                            if issue_activity.get("old_identifier")
-                                            else None
-                                        ),
-                                        "new_identifier": (
-                                            str(issue_activity.get("new_identifier"))
-                                            if issue_activity.get("new_identifier")
-                                            else None
-                                        ),
-                                        "activity_time": issue_activity.get("created_at"),
-                                    },
-                                },
-                            )
-                        )
+                    # NFR Refactor: Provider Dispatch
+                    context = {
+                        "triggered_by_id": actor_id,
+                        "receiver_id": subscriber,
+                        "entity_identifier": issue_id,
+                        "issue_data": {
+                             "id": str(issue_id),
+                             "name": str(issue.name),
+                             "identifier": str(issue.project.identifier),
+                             "project_id": str(issue.project.id),
+                             "workspace_slug": str(issue.project.workspace.slug),
+                             "sequence_id": issue.sequence_id,
+                             "state_name": issue.state.name,
+                             "state_group": issue.state.group,
+                        },
+                        "activity_data": {
+                            "id": str(issue_activity.get("id")),
+                            "verb": str(issue_activity.get("verb")),
+                            "field": str(issue_activity.get("field")),
+                            "actor": str(issue_activity.get("actor_id")),
+                            "new_value": str(issue_activity.get("new_value")),
+                            "old_value": str(issue_activity.get("old_value")),
+                            "issue_comment": str(issue_comment.comment_stripped if issue_comment is not None else ""),
+                            "old_identifier": (str(issue_activity.get("old_identifier")) if issue_activity.get("old_identifier") else None),
+                            "new_identifier": (str(issue_activity.get("new_identifier")) if issue_activity.get("new_identifier") else None),
+                            "activity_time": issue_activity.get("created_at"),
+                        }
+                    }
+
+                    for provider in providers:
+                         if provider.should_send(preference, issue_activity, project_id=project_id):
+                             payload = provider.construct_payload(context)
+                             provider_payloads[provider.provider_name].append(payload)
 
             # -------------------------------------------------------------------------------------------------------- #
 
@@ -472,47 +450,41 @@ def notifications(
                             activity=issue_activity,
                         )
 
-                        # check for email notifications
-                        if preference.mention:
-                            bulk_email_logs.append(
-                                EmailNotificationLog(
-                                    triggered_by_id=actor_id,
-                                    receiver_id=mention_id,
-                                    entity_identifier=issue_id,
-                                    entity_name="issue",
-                                    data={
-                                        "issue": {
-                                            "id": str(issue_id),
-                                            "name": str(issue.name),
-                                            "identifier": str(issue.project.identifier),
-                                            "sequence_id": issue.sequence_id,
-                                            "state_name": issue.state.name,
-                                            "state_group": issue.state.group,
-                                            "project_id": str(issue.project.id),
-                                            "workspace_slug": str(issue.project.workspace.slug),
-                                        },
-                                        "issue_activity": {
-                                            "id": str(issue_activity.get("id")),
-                                            "verb": str(issue_activity.get("verb")),
-                                            "field": str("mention"),
-                                            "actor": str(issue_activity.get("actor_id")),
-                                            "new_value": str(issue_activity.get("new_value")),
-                                            "old_value": str(issue_activity.get("old_value")),
-                                            "old_identifier": (
-                                                str(issue_activity.get("old_identifier"))
-                                                if issue_activity.get("old_identifier")
-                                                else None
-                                            ),
-                                            "new_identifier": (
-                                                str(issue_activity.get("new_identifier"))
-                                                if issue_activity.get("new_identifier")
-                                                else None
-                                            ),
-                                            "activity_time": issue_activity.get("created_at"),
-                                        },
-                                    },
-                                )
-                            )
+                        # NFR Refactor: Provider Dispatch (Comment Mention)
+                        mention_activity_for_check = issue_activity.copy()
+                        mention_activity_for_check['field'] = 'mention'
+                        
+                        context = {
+                            "triggered_by_id": actor_id,
+                            "receiver_id": mention_id,
+                            "entity_identifier": issue_id,
+                            "issue_data": {
+                                "id": str(issue_id),
+                                "name": str(issue.name),
+                                "identifier": str(issue.project.identifier),
+                                "sequence_id": issue.sequence_id,
+                                "state_name": issue.state.name,
+                                "state_group": issue.state.group,
+                                "project_id": str(issue.project.id),
+                                "workspace_slug": str(issue.project.workspace.slug),
+                            },
+                            "activity_data": {
+                                "id": str(issue_activity.get("id")),
+                                "verb": str(issue_activity.get("verb")),
+                                "field": "mention",
+                                "actor": str(issue_activity.get("actor_id")),
+                                "new_value": str(issue_activity.get("new_value")),
+                                "old_value": str(issue_activity.get("old_value")),
+                                "old_identifier": (str(issue_activity.get("old_identifier")) if issue_activity.get("old_identifier") else None),
+                                "new_identifier": (str(issue_activity.get("new_identifier")) if issue_activity.get("new_identifier") else None),
+                                "activity_time": issue_activity.get("created_at"),
+                            }
+                        }
+
+                        for provider in providers:
+                             if provider.should_send(preference, mention_activity_for_check, project_id=project_id):
+                                 payload = provider.construct_payload(context)
+                                 provider_payloads[provider.provider_name].append(payload)
                         bulk_notifications.append(notification)
 
             for mention_id in new_mentions:
@@ -565,44 +537,40 @@ def notifications(
                                 },
                             )
                         )
-                        if preference.mention:
-                            bulk_email_logs.append(
-                                EmailNotificationLog(
-                                    triggered_by_id=actor_id,
-                                    receiver_id=subscriber,
-                                    entity_identifier=issue_id,
-                                    entity_name="issue",
-                                    data={
-                                        "issue": {
-                                            "id": str(issue_id),
-                                            "name": str(issue.name),
-                                            "identifier": str(issue.project.identifier),
-                                            "sequence_id": issue.sequence_id,
-                                            "state_name": issue.state.name,
-                                            "state_group": issue.state.group,
-                                        },
-                                        "issue_activity": {
-                                            "id": str(last_activity.id),
-                                            "verb": str(last_activity.verb),
-                                            "field": "mention",
-                                            "actor": str(last_activity.actor_id),
-                                            "new_value": str(last_activity.new_value),
-                                            "old_value": str(last_activity.old_value),
-                                            "old_identifier": (
-                                                str(issue_activity.get("old_identifier"))
-                                                if issue_activity.get("old_identifier")
-                                                else None
-                                            ),
-                                            "new_identifier": (
-                                                str(issue_activity.get("new_identifier"))
-                                                if issue_activity.get("new_identifier")
-                                                else None
-                                            ),
-                                            "activity_time": str(last_activity.created_at),
-                                        },
-                                    },
-                                )
-                            )
+                        # NFR Refactor: Provider Dispatch (Description Mention via Last Activity)
+                        mention_activity_for_check = {'field': 'mention'}
+                        
+                        context = {
+                            "triggered_by_id": actor_id,
+                            "receiver_id": subscriber,
+                            "entity_identifier": issue_id,
+                            "issue_data": {
+                                "id": str(issue_id),
+                                "name": str(issue.name),
+                                "identifier": str(issue.project.identifier),
+                                "sequence_id": issue.sequence_id,
+                                "state_name": issue.state.name,
+                                "state_group": issue.state.group,
+                                "project_id": str(issue.project.id),
+                                "workspace_slug": str(issue.project.workspace.slug),
+                            },
+                            "activity_data": {
+                                "id": str(last_activity.id),
+                                "verb": str(last_activity.verb),
+                                "field": "mention",
+                                "actor": str(last_activity.actor_id),
+                                "new_value": str(last_activity.new_value),
+                                "old_value": str(last_activity.old_value),
+                                "old_identifier": (str(issue_activity.get("old_identifier")) if issue_activity.get("old_identifier") else None),
+                                "new_identifier": (str(issue_activity.get("new_identifier")) if issue_activity.get("new_identifier") else None),
+                                "activity_time": str(last_activity.created_at),
+                            }
+                        }
+
+                        for provider in providers:
+                             if provider.should_send(preference, mention_activity_for_check, project_id=project_id):
+                                 payload = provider.construct_payload(context)
+                                 provider_payloads[provider.provider_name].append(payload)
                     else:
                         for issue_activity in issue_activities_created:
                             notification = create_mention_notification(
@@ -663,7 +631,13 @@ def notifications(
             )
             # Bulk create notifications
             Notification.objects.bulk_create(bulk_notifications, batch_size=100)
-            EmailNotificationLog.objects.bulk_create(bulk_email_logs, batch_size=100, ignore_conflicts=True)
+            # NFR Refactor: Provider Dispatch
+            for provider in providers:
+                provider.bulk_dispatch(provider_payloads[provider.provider_name])
+
+            # Legacy fallback for unmigrated logic
+            if bulk_email_logs:
+                EmailNotificationLog.objects.bulk_create(bulk_email_logs, batch_size=100, ignore_conflicts=True)
         return
     except Exception as e:
         print(e)
