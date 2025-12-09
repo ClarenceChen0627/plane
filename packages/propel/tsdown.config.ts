@@ -37,11 +37,35 @@ export default defineConfig({
   outDir: "dist",
   format: ["esm", "cjs"],
   exports: {
-    customExports: (out) => ({
-      ...out,
-      "./styles/fonts": "./dist/styles/fonts/index.css",
-      "./styles/react-day-picker": "./dist/styles/react-day-picker.css",
-    }),
+    customExports: (out) => {
+      const fixedExports: typeof out = {};
+      for (const [key, value] of Object.entries(out)) {
+        // Fix key: replace backslashes with forward slashes
+        let newKey = key.replace(/\\/g, "/");
+        // Remove /index suffix if present to allow 'import ... from "@plane/propel/accordion"'
+        if (newKey.endsWith("/index")) {
+          newKey = newKey.replace(/\/index$/, "");
+        }
+
+        // Fix value: replace backslashes in paths
+        const fixPath = (path: string) => path.replace(/\\/g, "/");
+        const fixedValue =
+          typeof value === "string"
+            ? fixPath(value)
+            : {
+              import: fixPath((value as any).import),
+              require: fixPath((value as any).require),
+            };
+
+        fixedExports[newKey] = fixedValue;
+      }
+
+      return {
+        ...fixedExports,
+        "./styles/fonts": "./dist/styles/fonts/index.css",
+        "./styles/react-day-picker": "./dist/styles/react-day-picker.css",
+      };
+    },
   },
   copy: ["src/styles"],
   dts: true,
